@@ -24,8 +24,9 @@ import hashlib
 import numpy as np
 
 # ── Model version constants ───────────────────────────────────────────────────
-MODEL_VERSION_ZLIB = 0x00   # fallback
+MODEL_VERSION_ZLIB = 0x00   # legacy fallback
 MODEL_VERSION_V1   = 0x01   # lstm_text_v1.h5
+MODEL_VERSION_ZSTD = 0x02   # high-speed lossless (zstandard)
 
 # max file size enforced by the route, but double-check here too
 MAX_TEXT_SIZE_BYTES = 700 * 1024 * 1024   # 700 MB
@@ -135,9 +136,20 @@ def compress(file_bytes: bytes) -> tuple[bytes, int]:
         except Exception as exc:
             print(f"[text_compressor] LSTM compress failed ({exc}); falling back to zlib")
 
-    # zlib fallback — always available
-    payload = zlib.compress(file_bytes, level=9)
-    return payload, MODEL_VERSION_ZLIB
+    # ── Primary Lossless: Zstandard (zstd) ───────────────────────────────────
+    try:
+        import zstandard as _zstd
+        cctx = _zstd.ZstdCompressor(level=3, threads=-1)
+        payload = cctx.compress(file_bytes)
+        return payload, MODEL_VERSION_ZSTD
+    except ImportError:
+        # Final fallback: zlib — always available in standard library
+        payload = zlib.compress(file_bytes, level=9)
+        return payload, MODEL_VERSION_ZLIB
+    except Exception as exc:
+        print(f"[text_compressor] zstd compress failed ({exc}); falling back to zlib")
+        payload = zlib.compress(file_bytes, level=9)
+        return payload, MODEL_VERSION_ZLIB
 
 
 def decompress(payload: bytes, original_length: int, model_version: int) -> bytes:
@@ -162,7 +174,12 @@ def decompress(payload: bytes, original_length: int, model_version: int) -> byte
             )
         return _decompress_with_lstm(payload, original_length, model)
 
+    if model_version == MODEL_VERSION_ZSTD:
+        import zstandard as _zstd
+        dctx = _zstd.ZstdDecompressor()
+        return dctx.decompress(payload, max_output_size=original_length)
+
     raise ValueError(
         f"MODEL_VERSION_MISMATCH: unknown model version 0x{model_version:02x}. "
-        f"Only 0x00 (zlib) and 0x01 (lstm_v1) are supported."
+        f"Supported: 0x00 (zlib), 0x01 (lstm_v1), 0x02 (zstd)."
     )

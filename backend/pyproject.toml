@@ -1,0 +1,13 @@
+[project]
+name = "macs-compressor-backend"
+version = "2.0.0"
+dependencies = [
+    "flask",
+    "flask-cors",
+    "numpy",
+    "pillow",
+    "zstandard",
+]
+
+[tool.setuptools]
+packages = ["compressors", "utils"]

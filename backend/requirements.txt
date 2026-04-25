@@ -1,10 +1,8 @@
-flask==3.0.0
-flask-cors==4.0.0
-tensorflow==2.15.0
-constriction==0.4.0
-Pillow==10.3.0
-scikit-image==0.22.0
-pydub==0.25.1
-numpy==1.26.4
-zstandard==0.22.0
-scipy==1.13.0
+flask
+flask-cors
+numpy
+pillow
+zstandard
+# For audio/video features (requires FFmpeg in PATH)
+# scipy
+# pydub

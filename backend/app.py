@@ -17,6 +17,11 @@ import base64
 import tempfile
 import shutil
 
+try:
+    import zstandard
+except ImportError:
+    zstandard = None
+
 # Add FFmpeg to PATH programmatically if on Windows (fallback for winget installs)
 if os.name == 'nt':
     ffmpeg_path = os.path.join(os.environ.get('LOCALAPPDATA', ''), 
@@ -212,8 +217,9 @@ def compress():
                 }
             except Exception as audio_err:
                 # FFmpeg not installed — fall back to zstd lossless copy
-                import zstandard as _zstd
-                zstd_payload = _zstd.ZstdCompressor(level=3).compress(file_bytes)
+                if zstandard is None:
+                    raise audio_err
+                zstd_payload = zstandard.ZstdCompressor(level=3).compress(file_bytes)
                 macs_data = (
                     zstd_payload
                     + pack_header(file_type_code, False, 0x00,
@@ -283,28 +289,34 @@ def compress():
         import json
         from flask import Response, stream_with_context
 
-        def generate_json_stream():
-            yield '{"compressed_file_b64":"'
-            
-            chunk_sz = 3 * 1024 * 1024
-            for i in range(0, len(macs_data), chunk_sz):
-                yield base64.b64encode(macs_data[i:i+chunk_sz]).decode('ascii')
-                
-            yield '","residual_file_b64":'
-            if residual_data:
-                yield '"'
-                for i in range(0, len(residual_data), chunk_sz):
-                    yield base64.b64encode(residual_data[i:i+chunk_sz]).decode('ascii')
-                yield '"'
-            else:
-                yield 'null'
-                
-            for k, v in metadata.items():
-                yield f',"{k}":{json.dumps(v)}'
-                
-            yield '}'
+        import json
+        import struct
+        from flask import Response, stream_with_context
 
-        return Response(stream_with_context(generate_json_stream()), mimetype='application/json')
+        metadata_bytes = json.dumps(metadata).encode('utf-8')
+        metadata_len   = len(metadata_bytes)
+
+        def generate_binary_stream():
+            # Part 0: Header (4 bytes length + Metadata)
+            yield struct.pack('>I', metadata_len)
+            yield metadata_bytes
+            
+            chunk_sz = 1024 * 1024 # 1MB chunks
+            # Part 1: Main compressed file
+            for i in range(0, len(macs_data), chunk_sz):
+                yield macs_data[i:i+chunk_sz]
+            # Part 2: Residual file (if exists)
+            if residual_data:
+                for i in range(0, len(residual_data), chunk_sz):
+                    yield residual_data[i:i+chunk_sz]
+
+        resp = Response(stream_with_context(generate_binary_stream()), mimetype='application/octet-stream')
+        # We still keep these for backward compatibility/reference, but won't rely on them
+        resp.headers['X-MACS-Compressed-Size'] = str(len(macs_data))
+        resp.headers['X-MACS-Residual-Size'] = str(len(residual_data) if residual_data else 0)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        
+        return resp
 
     except Exception as e:
         return jsonify({
@@ -433,9 +445,8 @@ def decompress():
                 )
                 mode = 'perfect'
             else:
-                if payload.startswith(b'\x28\xb5\x2f\xfd'):
-                    import zstandard as _zstd
-                    reconstructed = _zstd.ZstdDecompressor().decompress(payload)
+                if payload.startswith(b'\x28\xb5\x2f\xfd') and zstandard is not None:
+                    reconstructed = zstandard.ZstdDecompressor().decompress(payload)
                     mode = 'perfect'
                 else:
                     reconstructed = audio_compressor.decompress_approximate(payload)
@@ -465,17 +476,35 @@ def decompress():
             sha256_match = (sha256_reconstructed == stored_sha256)
 
         # ── Build response ────────────────────────────────────────────────────
-        reconstructed_b64 = base64.b64encode(reconstructed).decode()
+        # For large files (500MB+), avoid JSON/Base64 and stream raw binary.
+        # We pass metadata through custom headers.
+        import json
+        from flask import Response, stream_with_context
 
-        return jsonify({
-            "status":                  "success",
-            "reconstruction_mode":     mode,
-            "sha256_match":            sha256_match,
-            "sha256_original":         stored_sha256,
-            "sha256_reconstructed":    sha256_reconstructed,
-            "original_filename":       original_name,
-            "reconstructed_file_b64":  reconstructed_b64,
-        })
+        metadata = {
+            "reconstruction_mode":  mode,
+            "sha256_match":         sha256_match,
+            "sha256_original":      stored_sha256,
+            "sha256_reconstructed": sha256_reconstructed,
+            "original_filename":    original_name,
+        }
+
+        metadata_bytes = json.dumps(metadata).encode('utf-8')
+        metadata_len   = len(metadata_bytes)
+
+        def generate_binary_stream():
+            # Part 0: Header (4 bytes length + Metadata)
+            yield struct.pack('>I', metadata_len)
+            yield metadata_bytes
+            
+            # Part 1: Reconstructed File
+            chunk_sz = 1024 * 1024
+            for i in range(0, len(reconstructed), chunk_sz):
+                yield reconstructed[i:i+chunk_sz]
+
+        resp = Response(stream_with_context(generate_binary_stream()), mimetype='application/octet-stream')
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
 
     except Exception as e:
         return jsonify({

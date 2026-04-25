@@ -32,6 +32,7 @@ function compressFile(file, onProgress) {
     fd.append('file', file);
 
     xhr.open('POST', `${BASE_URL}/compress`);
+    xhr.responseType = 'blob'; // Use blob for binary streaming
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
@@ -40,17 +41,43 @@ function compressFile(file, onProgress) {
       }
     });
 
-    xhr.addEventListener('load', () => {
-      try {
-        const data = JSON.parse(xhr.responseText);
-        if (xhr.status >= 200 && xhr.status < 300 && data.status === 'success') {
+    xhr.addEventListener('load', async () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const fullBlob = xhr.response;
+          const arrayBuffer = await fullBlob.arrayBuffer();
+          const view = new DataView(arrayBuffer);
+          
+          // Part 0: Read 4-byte metadata length
+          const metadataLen = view.getUint32(0, false); // Big-endian
+          
+          // Part 0: Extract and parse metadata
+          const metadataBytes = arrayBuffer.slice(4, 4 + metadataLen);
+          const metadataStr   = new TextDecoder().decode(metadataBytes);
+          const data          = JSON.parse(metadataStr);
+          
+          // Offsets for the files
+          const startFiles = 4 + metadataLen;
+          const compressedSize = data.compressed_size_bytes;
+          const residualSize   = data.residual_size_bytes;
+          
+          // Split the remainder into blobs
+          const compressedBlob = fullBlob.slice(startFiles, startFiles + compressedSize);
+          const residualBlob   = residualSize > 0 ? fullBlob.slice(startFiles + compressedSize, startFiles + compressedSize + residualSize) : null;
+          
           onProgress(100);
-          resolve(data);
-        } else {
-          reject(data);
+          resolve({ data, compressedBlob, residualBlob });
+        } catch (e) {
+          reject({ status: 'error', error_code: 'BACKEND_ERROR', message: 'Failed to parse binary package: ' + e.message });
         }
-      } catch (e) {
-        reject({ status: 'error', error_code: 'BACKEND_ERROR', message: 'Invalid JSON response from server.' });
+      } else {
+        // Error from backend (not success)
+        const text = await xhr.response.text();
+        try {
+          reject(JSON.parse(text));
+        } catch(e) {
+          reject({ status: 'error', message: text || 'Unknown server error' });
+        }
       }
     });
 
@@ -81,34 +108,60 @@ function compressFile(file, onProgress) {
 function decompressFiles(compressedFile, residualFile) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    const fd  = new FormData();
-    fd.append('compressed_file', compressedFile);
-    if (residualFile) { fd.append('residual_file', residualFile); }
+    xhr.open('POST', `${BASE_URL}/decompress`, true);
+    xhr.responseType = 'blob'; // Critical for large files
 
-    xhr.open('POST', `${BASE_URL}/decompress`);
-
-    xhr.addEventListener('load', () => {
-      try {
-        const data = JSON.parse(xhr.responseText);
-        if (xhr.status >= 200 && xhr.status < 300 && data.status === 'success') {
-          resolve(data);
-        } else {
-          reject(data);
+    xhr.addEventListener('load', async () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const fullBlob = xhr.response;
+          const arrayBuffer = await fullBlob.arrayBuffer();
+          const view = new DataView(arrayBuffer);
+          
+          // Part 0: Read 4-byte metadata length
+          const metadataLen = view.getUint32(0, false);
+          
+          // Part 0: Extract and parse metadata
+          const metadataBytes = arrayBuffer.slice(4, 4 + metadataLen);
+          const metadataStr   = new TextDecoder().decode(metadataBytes);
+          const data          = JSON.parse(metadataStr);
+          
+          // Part 1: Reconstructed file is everything after metadata
+          const blob = fullBlob.slice(4 + metadataLen);
+          
+          resolve({ data, blob });
+        } catch (e) {
+          reject({ status: 'error', error_code: 'BACKEND_ERROR', message: 'Failed to parse decompression package: ' + e.message });
         }
-      } catch (e) {
-        reject({ status: 'error', error_code: 'BACKEND_ERROR', message: 'Invalid JSON from server.' });
+      } else {
+        // Handle error responses (usually small JSON)
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const err = JSON.parse(reader.result);
+            reject(err);
+          } catch(e) {
+            reject({ status: 'error', error_code: 'SERVER_ERROR', message: `Server error: ${xhr.status}` });
+          }
+        };
+        reader.readAsText(xhr.response);
       }
     });
 
-    xhr.addEventListener('error', () => {
+    xhr.onerror = () => {
       reject({
         status: 'error',
         error_code: 'CONNECTION_ERROR',
-        message: 'Could not connect to the backend. Make sure Flask is running.',
+        message: 'Could not connect to the backend.',
       });
-    });
+    };
 
     xhr.timeout = 600000; // 10 minutes
+    
+    const fd = new FormData();
+    fd.append('compressed_file', compressedFile);
+    if (residualFile) fd.append('residual_file', residualFile);
+    
     xhr.send(fd);
   });
 }
@@ -257,10 +310,9 @@ function showCompressionResults(data) {
     audioInfo.classList.add('hidden');
   }
 
-  // Download buttons — residual is hidden by default (CSS display:none),
-  // only revealed when the backend confirms residual data exists.
+  // Download buttons
   const residualBtn = document.getElementById('btnDownloadResidual');
-  if (data.has_residual && data.residual_file_b64) {
+  if (data.has_residual) {
     residualBtn.style.display = 'flex';
   } else {
     residualBtn.style.display = 'none';
@@ -351,17 +403,16 @@ async function onCompressFileSelected(file) {
   }, intervalTime);
 
   try {
-    const data = await compressFile(file, (pct) => {
+    const { data, compressedBlob, residualBlob } = await compressFile(file, (pct) => {
       if (pct <= 80) updateProgress(pct);
     });
 
     clearInterval(processingInterval);
     updateProgress(100);
 
-    // Decode base64 → blobs
-    const mimeTypes = { text: 'application/octet-stream', image: 'application/octet-stream', audio: 'application/octet-stream', video: 'video/mp4' };
-    _compressedBlob = await b64ToBlob(data.compressed_file_b64, 'application/octet-stream');
-    _residualBlob   = data.residual_file_b64 ? await b64ToBlob(data.residual_file_b64, 'application/octet-stream') : null;
+    // Store blobs directly
+    _compressedBlob = compressedBlob;
+    _residualBlob   = residualBlob;
 
     showCompressionResults(data);
     saveCompressionRecord({
@@ -405,12 +456,11 @@ async function onDecompressFilesSelected() {
   document.getElementById('panelDecompress').appendChild(loadDiv);
 
   try {
-    const data = await decompressFiles(macsFile, residualFile);
+    const { data, blob } = await decompressFiles(macsFile, residualFile);
     loadDiv.remove();
 
-    // Store blob for download
-    const mime = guessMimeFromFilename(data.original_filename || 'file');
-    _reconstructedBlob     = await b64ToBlob(data.reconstructed_file_b64, mime);
+    // Store blob for download directly
+    _reconstructedBlob     = blob;
     _reconstructedFilename = data.original_filename || 'reconstructed_file';
 
     showDecompressionResults(data);
@@ -424,11 +474,19 @@ async function onDecompressFilesSelected() {
 
 function onDownloadCompressedClicked() {
   if (!_compressedBlob) return;
-  const match = _compressedFilename.match(/(\.[^.]+)$/);
-  const ext = match ? match[1].toLowerCase() : '';
+  
+  const fileType = detectFileTypeFromName(_compressedFilename);
   const base = _compressedFilename.replace(/\.[^.]+$/, '');
-  // All compressed files get .macs extension to make them identifiable
-  triggerDownload(_compressedBlob, `${base}.macs`);
+  
+  if (fileType === 'video' || fileType === 'image' || fileType === 'audio') {
+    // For media files, keep a playable/viewable extension
+    // The .macs metadata is at the end, so standard players will ignore it.
+    const ext = _compressedFilename.split('.').pop() || 'file';
+    triggerDownload(_compressedBlob, `${base}_compressed.${ext}`);
+  } else {
+    // For text/code, keep .macs as text editors might try to parse the binary metadata if kept as .txt
+    triggerDownload(_compressedBlob, `${base}.macs`);
+  }
 }
 
 function onDownloadResidualClicked() {
