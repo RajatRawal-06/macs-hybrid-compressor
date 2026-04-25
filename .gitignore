@@ -1,0 +1,17 @@
+*.pem
+*.key
+node_modules/
+__pycache__/
+*.pyc
+.env
+backend/temp/*
+!backend/temp/.gitkeep
+backend/models/*.h5
+backend/models/*.pt
+.DS_Store
+Thumbs.db
+*.egg-info/
+dist/
+build/
+venv/
+.venv/

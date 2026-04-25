@@ -1,0 +1,22 @@
+Hello World. This is a sample text file for MACS Compressor testing.
+
+The MACS Compressor uses LSTM-based arithmetic coding for text files (Lane A).
+This means every byte of this file will be perfectly reconstructed after compression.
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor
+incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis
+nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+Python code example:
+def fibonacci(n):
+    if n <= 1:
+        return n
+    return fibonacci(n-1) + fibonacci(n-2)
+
+print([fibonacci(i) for i in range(10)])
+
+JSON data example:
+{"users": [{"id": 1, "name": "Alice", "score": 98.5}, {"id": 2, "name": "Bob", "score": 87.3}]}
+
+SHA-256 of this file will be stored in the .macs header and verified on reconstruction.
+PERFECT MATCH guaranteed — byte-for-byte identical reconstruction every time.

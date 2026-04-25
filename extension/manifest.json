@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "MACS Compressor",
+  "version": "1.0",
+  "description": "Hybrid Residual Compression Engine — compress any file with byte-perfect reconstruction.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://localhost:5000/*",
+    "http://127.0.0.1:5000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16":  "assets/icons/icon16.png",
+      "48":  "assets/icons/icon48.png",
+      "128": "assets/icons/icon128.png"
+    }
+  }
+}
